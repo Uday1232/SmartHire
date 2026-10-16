@@ -1,0 +1,219 @@
+package com.smarthire.service.impl;
+
+import com.smarthire.config.CacheConfig;
+import com.smarthire.dto.ResumeExtractionResult;
+import com.smarthire.dto.response.CandidateProfileResponse;
+import com.smarthire.dto.response.CandidateProjectResponse;
+import com.smarthire.entity.Candidate;
+import com.smarthire.entity.CandidateProfile;
+import com.smarthire.entity.CandidateProject;
+import com.smarthire.entity.Company;
+import com.smarthire.enums.ProfileStatus;
+import com.smarthire.exception.ResourceNotFoundException;
+import com.smarthire.exception.ResumeTextExtractionException;
+import com.smarthire.exception.UnsupportedResumeFormatException;
+import com.smarthire.repository.CandidateProfileRepository;
+import com.smarthire.repository.CandidateRepository;
+import com.smarthire.service.AiResumeExtractor;
+import com.smarthire.service.ResumeDownloader;
+import com.smarthire.service.ResumeIntelligenceService;
+import com.smarthire.service.ResumeTextExtractor;
+import com.smarthire.service.SecurityService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class ResumeIntelligenceServiceImpl implements ResumeIntelligenceService {
+
+    private final CandidateRepository candidateRepository;
+    private final CandidateProfileRepository profileRepository;
+    private final SecurityService securityService;
+    private final List<ResumeDownloader> resumeDownloaders;
+    private final List<ResumeTextExtractor> resumeTextExtractors;
+    private final AiResumeExtractor aiResumeExtractor;
+
+    @Override
+    @Transactional
+    @CacheEvict(value = CacheConfig.CANDIDATE_PROFILE, key = "#candidateId")
+    public CandidateProfileResponse parseResume(UUID candidateId) {
+        Company company = securityService.getCurrentUserCompany();
+        Candidate candidate = resolveCompanyCandidate(candidateId, company.getId());
+
+        // Step 1: Validate resume URL
+        String resumeUrl = candidate.getResumeUrl();
+        if (resumeUrl == null || resumeUrl.isBlank()) {
+            throw new IllegalArgumentException("Candidate resume URL is blank");
+        }
+
+        try {
+            // Step 2: Select downloader (Strategy pattern)
+            ResumeDownloader downloader = resumeDownloaders.stream()
+                    .filter(d -> d.supports(resumeUrl))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "No supported downloader found for URL: " + resumeUrl));
+
+            // Step 3: Download resume bytes
+            byte[] bytes = downloader.download(resumeUrl);
+
+            // Step 4: Select text extractor (Strategy pattern)
+            ResumeTextExtractor extractor = resumeTextExtractors.stream()
+                    .filter(e -> e.supports(bytes))
+                    .findFirst()
+                    .orElseThrow(() -> new UnsupportedResumeFormatException(
+                            "Unsupported resume format for URL: " + resumeUrl));
+
+            // Step 5: Extract text
+            String text = extractor.extract(bytes);
+
+            // Step 6: Validate extracted text length
+            if (text.strip().length() < 50) {
+                throw new ResumeTextExtractionException(
+                        "Extracted text is too short (< 50 characters) for URL: " + resumeUrl);
+            }
+
+            // Step 7: AI extraction
+            ResumeExtractionResult result = aiResumeExtractor.extract(text);
+
+            // Step 8: Delete existing profile
+            profileRepository.findByCandidateId(candidateId).ifPresent(p -> {
+                profileRepository.delete(p);
+                profileRepository.flush(); // Prevent unique constraint violation
+            });
+
+            // Step 9: Build CandidateProfile
+            CandidateProfile profile = new CandidateProfile();
+            profile.setCandidate(candidate);
+
+            String primarySkillsStr = result.primarySkills() == null
+                    ? ""
+                    : String.join(", ", result.primarySkills());
+            if (primarySkillsStr.length() > 2000) {
+                primarySkillsStr = primarySkillsStr.substring(0, 1997) + "...";
+            }
+            profile.setPrimarySkills(primarySkillsStr);
+
+            String secondarySkillsStr = result.secondarySkills() == null
+                    ? ""
+                    : String.join(", ", result.secondarySkills());
+            if (secondarySkillsStr.length() > 2000) {
+                secondarySkillsStr = secondarySkillsStr.substring(0, 1997) + "...";
+            }
+            profile.setSecondarySkills(secondarySkillsStr);
+            
+            profile.setStatus(ProfileStatus.PARSED);
+            profile.setParsedAt(LocalDateTime.now());
+
+            // Step 10: Build CandidateProject list
+            List<CandidateProject> projects = result.projects().stream()
+                    .map(p -> {
+                        CandidateProject project = new CandidateProject();
+                        project.setCandidateProfile(profile);
+                        
+                        String name = p.name() != null ? p.name() : "Unnamed Project";
+                        project.setProjectName(name.length() > 255 ? name.substring(0, 255) : name);
+                        
+                        String techStack = p.techStack() != null ? String.join(", ", p.techStack()) : "";
+                        project.setTechStack(techStack.length() > 1000 ? techStack.substring(0, 1000) : techStack);
+                        
+                        String desc = p.description() != null ? p.description() : "";
+                        project.setDescription(desc.length() > 2000 ? desc.substring(0, 2000) : desc);
+                        
+                        return project;
+                    })
+                    .collect(Collectors.toList());
+            profile.setProjects(projects);
+
+            // Step 11: Persist and return
+            CandidateProfile saved = profileRepository.save(profile);
+            return toResponse(saved);
+
+        } catch (Exception ex) {
+            // On any pipeline failure: persist a FAILED profile, then rethrow
+            try {
+                profileRepository.findByCandidateId(candidateId).ifPresent(p -> {
+                    profileRepository.delete(p);
+                    profileRepository.flush(); // Ensure old profile is deleted immediately
+                });
+                CandidateProfile failed = new CandidateProfile();
+                failed.setCandidate(candidate);
+                failed.setStatus(ProfileStatus.FAILED);
+                failed.setProjects(List.of());
+                profileRepository.save(failed);
+            } catch (Exception saveEx) {
+                // Suppress save failure — original exception is more important
+            }
+            throw ex;
+        }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    @Cacheable(value = CacheConfig.CANDIDATE_PROFILE, key = "#candidateId")
+    public CandidateProfileResponse getProfile(UUID candidateId) {
+        Company company = securityService.getCurrentUserCompany();
+        resolveCompanyCandidate(candidateId, company.getId());
+
+        CandidateProfile profile = profileRepository.findByCandidateId(candidateId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No profile found for candidate. Trigger parse-resume first."));
+        return toResponse(profile);
+    }
+
+    private Candidate resolveCompanyCandidate(UUID candidateId, UUID companyId) {
+        Candidate candidate = candidateRepository.findById(candidateId)
+                .orElseThrow(() -> new ResourceNotFoundException("Candidate not found"));
+        if (!candidate.getHiringDrive().getCompany().getId().equals(companyId)) {
+            throw new ResourceNotFoundException("Candidate not found");
+        }
+        return candidate;
+    }
+
+    private CandidateProfileResponse toResponse(CandidateProfile profile) {
+        List<String> primarySkills = profile.getPrimarySkills() == null || profile.getPrimarySkills().isBlank()
+                ? List.of()
+                : Arrays.stream(profile.getPrimarySkills().split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .toList();
+
+        List<String> secondarySkills = profile.getSecondarySkills() == null || profile.getSecondarySkills().isBlank()
+                ? List.of()
+                : Arrays.stream(profile.getSecondarySkills().split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .toList();
+
+        List<CandidateProjectResponse> projects = profile.getProjects() == null
+                ? List.of()
+                : profile.getProjects().stream()
+                        .map(p -> CandidateProjectResponse.builder()
+                                .id(p.getId())
+                                .projectName(p.getProjectName())
+                                .techStack(p.getTechStack())
+                                .description(p.getDescription())
+                                .build())
+                        .toList();
+
+        return CandidateProfileResponse.builder()
+                .id(profile.getId())
+                .candidateId(profile.getCandidate().getId())
+                .candidateFullName(profile.getCandidate().getFullName())
+                .primarySkills(primarySkills)
+                .secondarySkills(secondarySkills)
+                .projects(projects)
+                .status(profile.getStatus())
+                .parsedAt(profile.getParsedAt())
+                .build();
+    }
+}

@@ -1,0 +1,35 @@
+.vscode/
+.kiro/
+
+# Environment secrets — never commit real .env
+.env
+*.env.local
+
+# Docker volumes / temp
+postgres_data/
+
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Java / Spring Boot
+**/target/
+*.class
+
+# Node / React frontend
+**/node_modules/
+**/dist/
+**/build/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
