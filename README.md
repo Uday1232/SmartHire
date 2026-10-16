@@ -103,16 +103,7 @@ SmartHire/
 
 ---
 
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/TechRitesh27/SmartHire.git
-cd SmartHire
-```
-
----
-
-### 2. Set Up the Backend
+### 1. Set Up the Backend
 
 Navigate to the backend folder:
 
@@ -135,7 +126,7 @@ Create the `smarthire` database in PostgreSQL. Flyway will automatically apply t
 
 ---
 
-### 3. Run the Backend
+### 2. Run the Backend
 
 ```powershell
 .\mvnw.cmd spring-boot:run
@@ -145,7 +136,7 @@ Wait for Spring Boot to report that it has started. Keep this terminal open.
 
 ---
 
-### 4. Set Up the Frontend
+### 3. Set Up the Frontend
 
 Open a second terminal and navigate to the frontend directory:
 
@@ -176,7 +167,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-### 5. First-Time Setup
+### 4. First-Time Setup
 
 Open [http://localhost:3000/setup](http://localhost:3000/setup) to create the initial **Super Admin** account. This route is only available while no Super Admin exists.
 
@@ -284,7 +275,7 @@ These enhancements can be introduced incrementally as the project evolves.
 **Uday Badhe**
 Aspiring Full-Stack Developer | Java | Spring Boot | React.js | PostgreSQL | AI Integration
 
-GitHub: [@TechRitesh27](https://github.com/TechRitesh27)
+GitHub: [@Uday1232](https://github.com/Uday1232)
 
 ---
 
